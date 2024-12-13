@@ -1,0 +1,103 @@
+from pdfminer.converter import PDFPageAggregator
+from pdfminer.layout import LAParams, LTFigure, LTTextBox
+from pdfminer.pdfdocument import PDFDocument
+from pdfminer.pdfinterp import PDFPageInterpreter, PDFResourceManager
+from pdfminer.pdfpage import PDFPage
+from pdfminer.pdfparser import PDFParser
+from datetime import datetime
+import re, os
+import pypyodbc as odbc
+
+directory = r'YOUR_DIRECTORY'
+
+# Function to list all entries in the directory
+def list_entries(directory):
+    entries = os.listdir(directory)
+    for entry in entries:
+        print(entry)
+    return entries
+
+# Function to process each PDF file
+def process_pdf(filepath):
+    text = ""
+    stack = [""]
+    
+    with open(filepath, 'rb') as f:
+        parser = PDFParser(f)
+        doc = PDFDocument(parser)
+        
+        for page in PDFPage.create_pages(doc):
+            rsrcmgr = PDFResourceManager()
+            device = PDFPageAggregator(rsrcmgr, laparams=LAParams())
+            interpreter = PDFPageInterpreter(rsrcmgr, device)
+            interpreter.process_page(page)
+            layout = device.get_result()
+            
+            for obj in layout:
+                if isinstance(obj, LTTextBox):
+                    text += obj.get_text()
+                elif isinstance(obj, LTFigure):
+                    stack += list(obj)
+    
+    return text
+
+# Function to extract data from the PDF text
+def extract_data(text, entry):
+    try:
+        customer_name = re.search(r'Customer Name\n(.*?)\n', text).group(1)
+        street = re.search(r'Street\n(.*?)\n', text).group(1)
+        postcode_city = re.search(r'Postcode City\n(.*?)\n', text).group(1)
+        postcode, city = postcode_city.split(" ", 1)
+        country = re.search(r'Country\n(.*?)\n', text).group(1)
+        invoice_date = re.search(r'Invoice date: (.*?)\n', text).group(1)
+        invoice_number = re.search(r'Invoice number: (.*?)\n', text).group(1)
+        payment_due = re.search(r'Payment due: (.*?)\n', text).group(1)
+        
+        data = [[customer_name, street, postcode, city, country, invoice_date, invoice_number, payment_due]]
+        return data
+    except AttributeError:
+        return None
+
+# Function to insert data into the SQL database
+def insert_into_db(data):
+    columns = ['CustomerName', 'Street', 'Postcode', 'City', 'Country', 'InvoiceDate', 'InvoiceNumber', 'PaymentDue']
+    cnxn = odbc.connect(r'Driver=SQL Server;Server=YOUR_SERVER;Database=YOUR_DATABASE;UID=YOUR_USERNAME;PWD=YOUR_PASSWORD;Trusted_Connection=no;')
+    cursor = cnxn.cursor()
+    
+    cursor.executemany("""
+        INSERT INTO Invoices (CustomerName, Street, Postcode, City, Country, InvoiceDate, InvoiceNumber, PaymentDue)
+        VALUES (?,?,?,?,?,?,?,?)
+    """, data)
+    
+    cnxn.commit()
+    cnxn.close()
+
+# Function to move invalid files
+def move_invalid_file(entry, directory):
+    new_path = os.path.join(directory, 'Not valid', entry)
+    old_path = os.path.join(directory, entry)
+    os.replace(old_path, new_path)
+    print(entry, "not a valid invoice")
+    print(entry, "moved")
+
+# Main function to process all entries
+def main():
+    entries = list_entries(directory)
+    for entry in entries:
+        try:
+            filepath = os.path.join(directory, entry)
+            text = process_pdf(filepath)
+            data = extract_data(text, entry)
+            
+            if data:
+                print(data)
+                insert_into_db(data)
+            else:
+                move_invalid_file(entry, directory)
+        
+        except OSError:
+            move_invalid_file(entry, directory)
+            continue
+
+if __name__ == "__main__":
+    main()
